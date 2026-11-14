@@ -11,6 +11,7 @@
 #include "categories/VectorOps.h"
 #include "categories/MatrixOps.h"
 #include "categories/QuaternionOps.h"
+#include "categories/BoundaryOps.h"
 #include "categories/Addition.h"
 #include "categories/Subtraction.h"
 #include "categories/Multiplication.h"

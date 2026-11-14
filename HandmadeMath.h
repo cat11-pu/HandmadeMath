@@ -482,6 +482,37 @@ static inline float HMM_ToTurn(float Angle)
  * Floating-point math functions
  */
 
+/* Internal, dependency-free floating point predicates. They classify IEEE-754
+ * single precision values by their bit pattern, so they work even when the C
+ * runtime math library (and thus isnan()/isfinite()) is provided externally.
+ * All comparisons go through copies made with HMM_STORE_F32, which keeps the
+ * result well defined for NaN inputs without requiring <math.h>. */
+
+typedef union HMM_F32Bits
+{
+    float F;
+    unsigned int U;
+} HMM_F32Bits;
+
+static inline HMM_Bool _HMM_IsNaNF(float Float)
+{
+    HMM_F32Bits Bits;
+    Bits.F = Float;
+
+    /* Exponent all ones with a non-zero significand. */
+    return (HMM_Bool)((Bits.U & 0x7F800000u) == 0x7F800000u &&
+                      (Bits.U & 0x007FFFFFu) != 0u);
+}
+
+static inline HMM_Bool _HMM_IsFiniteF(float Float)
+{
+    HMM_F32Bits Bits;
+    Bits.F = Float;
+
+    /* Any exponent other than all ones is finite. */
+    return (HMM_Bool)((Bits.U & 0x7F800000u) != 0x7F800000u);
+}
+
 COVERAGE(HMM_SinF, 1)
 static inline float HMM_SinF(float Angle)
 {
@@ -517,6 +548,14 @@ static inline float HMM_SqrtF(float Float)
 
     float Result;
 
+    /* A negative or NaN input has no real square root. Return positive zero
+     * instead of letting NaN propagate, and keep +inf for +inf so finite,
+     * in-domain inputs keep their exact previous result. */
+    if (_HMM_IsNaNF(Float) || Float < 0.0f)
+    {
+        return 0.0f;
+    }
+
 #ifdef HANDMADE_MATH__USE_SSE
     __m128 In = _mm_set_ss(Float);
     __m128 Out = _mm_sqrt_ss(In);
@@ -539,7 +578,19 @@ static inline float HMM_InvSqrtF(float Float)
 
     float Result;
 
-    Result = 1.0f/HMM_SqrtF(Float);
+    /* HMM_SqrtF already maps NaN/negative inputs to zero, which would make
+     * this divide overflow to +inf. Only invert a strictly positive, finite
+     * value; anything else (zero, subnormal that underflows, NaN, inf) yields
+     * zero, so callers that multiply by this get a defined zero vector rather
+     * than infinities or NaNs. */
+    if (_HMM_IsFiniteF(Float) && Float > 0.0f)
+    {
+        Result = 1.0f/HMM_SqrtF(Float);
+    }
+    else
+    {
+        Result = 0.0f;
+    }
 
     return Result;
 }
@@ -1039,6 +1090,10 @@ COVERAGE(HMM_LenV2, 1)
 static inline float HMM_LenV2(HMM_Vec2 A)
 {
     ASSERT_COVERED(HMM_LenV2);
+    if (!_HMM_IsFiniteF(A.X) || !_HMM_IsFiniteF(A.Y))
+    {
+        return 0.0f;
+    }
     return HMM_SqrtF(HMM_LenSqrV2(A));
 }
 
@@ -1046,6 +1101,10 @@ COVERAGE(HMM_LenV3, 1)
 static inline float HMM_LenV3(HMM_Vec3 A)
 {
     ASSERT_COVERED(HMM_LenV3);
+    if (!_HMM_IsFiniteF(A.X) || !_HMM_IsFiniteF(A.Y) || !_HMM_IsFiniteF(A.Z))
+    {
+        return 0.0f;
+    }
     return HMM_SqrtF(HMM_LenSqrV3(A));
 }
 
@@ -1053,6 +1112,11 @@ COVERAGE(HMM_LenV4, 1)
 static inline float HMM_LenV4(HMM_Vec4 A)
 {
     ASSERT_COVERED(HMM_LenV4);
+    if (!_HMM_IsFiniteF(A.X) || !_HMM_IsFiniteF(A.Y) ||
+        !_HMM_IsFiniteF(A.Z) || !_HMM_IsFiniteF(A.W))
+    {
+        return 0.0f;
+    }
     return HMM_SqrtF(HMM_LenSqrV4(A));
 }
 
@@ -1060,6 +1124,10 @@ COVERAGE(HMM_NormV2, 1)
 static inline HMM_Vec2 HMM_NormV2(HMM_Vec2 A)
 {
     ASSERT_COVERED(HMM_NormV2);
+    if (!_HMM_IsFiniteF(A.X) || !_HMM_IsFiniteF(A.Y))
+    {
+        return HMM_V2(0.0f, 0.0f);
+    }
     return HMM_MulV2F(A, HMM_InvSqrtF(HMM_DotV2(A, A)));
 }
 
@@ -1067,6 +1135,10 @@ COVERAGE(HMM_NormV3, 1)
 static inline HMM_Vec3 HMM_NormV3(HMM_Vec3 A)
 {
     ASSERT_COVERED(HMM_NormV3);
+    if (!_HMM_IsFiniteF(A.X) || !_HMM_IsFiniteF(A.Y) || !_HMM_IsFiniteF(A.Z))
+    {
+        return HMM_V3(0.0f, 0.0f, 0.0f);
+    }
     return HMM_MulV3F(A, HMM_InvSqrtF(HMM_DotV3(A, A)));
 }
 
@@ -1074,6 +1146,11 @@ COVERAGE(HMM_NormV4, 1)
 static inline HMM_Vec4 HMM_NormV4(HMM_Vec4 A)
 {
     ASSERT_COVERED(HMM_NormV4);
+    if (!_HMM_IsFiniteF(A.X) || !_HMM_IsFiniteF(A.Y) ||
+        !_HMM_IsFiniteF(A.Z) || !_HMM_IsFiniteF(A.W))
+    {
+        return HMM_V4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
     return HMM_MulV4F(A, HMM_InvSqrtF(HMM_DotV4(A, A)));
 }
 
@@ -2315,19 +2392,40 @@ static inline HMM_Quat HMM_InvQ(HMM_Quat Left)
 {
     ASSERT_COVERED(HMM_InvQ);
 
+    float LengthSquared = HMM_DotQ(Left, Left);
+
+    /* A non-finite component makes the dot product NaN, and a zero quaternion
+     * has no inverse. Either way the old code divided by zero and produced NaN
+     * ("non-numeric pose"). Return the identity rotation instead. */
+    if (!_HMM_IsFiniteF(LengthSquared) || LengthSquared <= 0.0f)
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+
     HMM_Quat Result;
     Result.X = -Left.X;
     Result.Y = -Left.Y;
     Result.Z = -Left.Z;
     Result.W = Left.W;
 
-    return HMM_DivQF(Result, (HMM_DotQ(Left, Left)));
+    return HMM_DivQF(Result, LengthSquared);
 }
 
 COVERAGE(HMM_NormQ, 1)
 static inline HMM_Quat HMM_NormQ(HMM_Quat Quat)
 {
     ASSERT_COVERED(HMM_NormQ);
+
+    float LengthSquared = HMM_DotQ(Quat, Quat);
+
+    /* Reject non-finite input and zero (or vanishingly small) magnitude before
+     * dividing. The identity quaternion is the canonical "no rotation" result,
+     * so a degenerate pose becomes a valid rotation rather than NaN. Every
+     * finite, non-zero input keeps the exact same computation (and bits). */
+    if (!_HMM_IsFiniteF(LengthSquared) || LengthSquared <= 0.0f)
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
 
     /* NOTE(lcf): Take advantage of SSE implementation in HMM_NormV4 */
     HMM_Vec4 Vec = HMM_V4(Quat.X, Quat.Y, Quat.Z, Quat.W);
@@ -2380,6 +2478,14 @@ static inline HMM_Quat HMM_SLerp(HMM_Quat Left, float Time, HMM_Quat Right)
 
     float Cos_Theta = HMM_DotQ(Left, Right);
 
+    /* A non-finite dot product means at least one input is NaN/inf. There is no
+     * meaningful interpolation, so return the identity rotation instead of
+     * feeding NaN into acos/sin and propagating a non-numeric pose. */
+    if (!_HMM_IsFiniteF(Cos_Theta))
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+
     if (Cos_Theta < 0.0f) { /* NOTE(lcf): Take shortest path on Hyper-sphere */
         Cos_Theta = -Cos_Theta;
         Right = HMM_Q(-Right.X, -Right.Y, -Right.Z, -Right.W);
@@ -2389,7 +2495,19 @@ static inline HMM_Quat HMM_SLerp(HMM_Quat Left, float Time, HMM_Quat Right)
     if (Cos_Theta > 0.9995f) {
         Result = HMM_NLerp(Left, Time, Right);
     } else {
-        float Angle = HMM_ACosF(Cos_Theta);
+        /* Clamp into the acos domain. With finite inputs the dot product can
+         * still round to slightly outside [-1, 1], which would yield NaN. */
+        float ClampedCos = Cos_Theta;
+        if (ClampedCos < -1.0f)
+        {
+            ClampedCos = -1.0f;
+        }
+        else if (ClampedCos > 1.0f)
+        {
+            ClampedCos = 1.0f;
+        }
+
+        float Angle = HMM_ACosF(ClampedCos);
         float MixLeft = HMM_SinF((1.0f - Time) * Angle);
         float MixRight = HMM_SinF(Time * Angle);
 
@@ -2466,6 +2584,16 @@ static inline HMM_Quat HMM_M4ToQ_RH(HMM_Mat4 M)
     float T;
     HMM_Quat Q;
 
+    /* Every branch below builds the scale term T from the diagonal. A
+     * non-finite diagonal poisons T (and the NaN comparisons make which branch
+     * is taken unspecified), so bail out to the identity before any divide. */
+    if (!_HMM_IsFiniteF(M.Elements[0][0]) ||
+        !_HMM_IsFiniteF(M.Elements[1][1]) ||
+        !_HMM_IsFiniteF(M.Elements[2][2]))
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+
     if (M.Elements[2][2] < 0.0f) {
         if (M.Elements[0][0] > M.Elements[1][1]) {
             ASSERT_COVERED(HMM_M4ToQ_RH);
@@ -2512,6 +2640,14 @@ static inline HMM_Quat HMM_M4ToQ_RH(HMM_Mat4 M)
         }
     }
 
+    /* T is the trace-derived scale. A non-finite or non-positive value makes
+     * 1/sqrt(T) undefined (division by zero or NaN); a degenerate matrix has
+     * no valid rotation, so return the identity quaternion. */
+    if (!_HMM_IsFiniteF(T) || T <= 0.0f)
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+
     Q = HMM_MulQF(Q, 0.5f / HMM_SqrtF(T));
 
     return Q;
@@ -2522,6 +2658,16 @@ static inline HMM_Quat HMM_M4ToQ_LH(HMM_Mat4 M)
 {
     float T;
     HMM_Quat Q;
+
+    /* Every branch below builds the scale term T from the diagonal. A
+     * non-finite diagonal poisons T (and the NaN comparisons make which branch
+     * is taken unspecified), so bail out to the identity before any divide. */
+    if (!_HMM_IsFiniteF(M.Elements[0][0]) ||
+        !_HMM_IsFiniteF(M.Elements[1][1]) ||
+        !_HMM_IsFiniteF(M.Elements[2][2]))
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
 
     if (M.Elements[2][2] < 0.0f) {
         if (M.Elements[0][0] > M.Elements[1][1]) {
@@ -2569,6 +2715,14 @@ static inline HMM_Quat HMM_M4ToQ_LH(HMM_Mat4 M)
         }
     }
 
+    /* T is the trace-derived scale. A non-finite or non-positive value makes
+     * 1/sqrt(T) undefined (division by zero or NaN); a degenerate matrix has
+     * no valid rotation, so return the identity quaternion. */
+    if (!_HMM_IsFiniteF(T) || T <= 0.0f)
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+
     Q = HMM_MulQF(Q, 0.5f / HMM_SqrtF(T));
 
     return Q;
@@ -2581,6 +2735,16 @@ static inline HMM_Quat HMM_QFromAxisAngle_RH(HMM_Vec3 Axis, float Angle)
     ASSERT_COVERED(HMM_QFromAxisAngle_RH);
 
     HMM_Quat Result;
+
+    /* A zero/non-finite axis or a non-finite angle cannot define a rotation.
+     * Normalizing the axis would otherwise produce a zero vector and, combined
+     * with the trig terms, leak NaN into the pose. */
+    if (!_HMM_IsFiniteF(Axis.X) || !_HMM_IsFiniteF(Axis.Y) ||
+        !_HMM_IsFiniteF(Axis.Z) || !_HMM_IsFiniteF(Angle) ||
+        (Axis.X == 0.0f && Axis.Y == 0.0f && Axis.Z == 0.0f))
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
 
     HMM_Vec3 AxisNormalized = HMM_NormV3(Axis);
     float SineOfRotation = HMM_SinF(Angle / 2.0f);
@@ -2605,6 +2769,15 @@ static inline HMM_Quat HMM_QFromNormPair(HMM_Vec3 Left, HMM_Vec3 Right)
     ASSERT_COVERED(HMM_QFromNormPair);
 
     HMM_Quat Result;
+
+    /* Any non-finite component, or two parallel/anti-parallel unit vectors
+     * (cross product zero and dot product +/-1), yields a zero quaternion that
+     * cannot be normalized. Return the identity rotation in that case. */
+    if (!_HMM_IsFiniteF(Left.X) || !_HMM_IsFiniteF(Left.Y) || !_HMM_IsFiniteF(Left.Z) ||
+        !_HMM_IsFiniteF(Right.X) || !_HMM_IsFiniteF(Right.Y) || !_HMM_IsFiniteF(Right.Z))
+    {
+        return HMM_Q(0.0f, 0.0f, 0.0f, 1.0f);
+    }
 
     Result.XYZ = HMM_Cross(Left, Right);
     Result.W = 1.0f + HMM_DotV3(Left, Right);
