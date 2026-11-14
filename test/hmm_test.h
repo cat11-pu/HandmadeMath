@@ -14,6 +14,7 @@
 #include "categories/Addition.h"
 #include "categories/Subtraction.h"
 #include "categories/Multiplication.h"
+#include "categories/Premultiply.h"
 #include "categories/Division.h"
 #include "categories/Equality.h"
 #include "categories/Projection.h"

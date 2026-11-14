@@ -1640,6 +1640,68 @@ static inline HMM_Vec4 HMM_MulM4V4(HMM_Mat4 Matrix, HMM_Vec4 Vector)
     return HMM_LinearCombineV4M4(Vector, Matrix);
 }
 
+/*
+ * Premultiplied (fused) matrix transforms
+ *
+ * Batch code that applies the same chain of matrices to many points often
+ * rebuilds the combined matrix on every point: HMM_MulM4V4(HMM_MulM4(A, B), v).
+ * HMM_PremultiplyM4 fuses the whole chain into a single matrix once, and each
+ * point then costs a single matrix-vector multiply-add. Because the fused
+ * matrix is built with the same HMM_MulM4 operations and HMM_ApplyPremultipliedM4
+ * dispatches to the exact same HMM_MulM4V4 kernel, results are bit-for-bit
+ * identical to evaluating the chain per point.
+ */
+
+COVERAGE(HMM_PremultiplyM4, 1)
+static inline HMM_Mat4 HMM_PremultiplyM4(HMM_Mat4 First, HMM_Mat4 Second)
+{
+    ASSERT_COVERED(HMM_PremultiplyM4);
+    return HMM_MulM4(First, Second);
+}
+
+COVERAGE(HMM_PremultiplyM4N, 1)
+static inline HMM_Mat4 HMM_PremultiplyM4N(const HMM_Mat4* Matrices, int Count)
+{
+    ASSERT_COVERED(HMM_PremultiplyM4N);
+
+    HMM_Mat4 Result = HMM_M4D(1.0f);
+    for (int Index = 0; Index < Count; ++Index)
+    {
+        Result = HMM_MulM4(Result, Matrices[Index]);
+    }
+
+    return Result;
+}
+
+COVERAGE(HMM_ApplyPremultipliedM4, 1)
+static inline HMM_Vec4 HMM_ApplyPremultipliedM4(HMM_Mat4 Premultiplied, HMM_Vec4 Vector)
+{
+    ASSERT_COVERED(HMM_ApplyPremultipliedM4);
+    return HMM_MulM4V4(Premultiplied, Vector);
+}
+
+COVERAGE(HMM_ApplyPremultipliedM4V3, 1)
+static inline HMM_Vec3 HMM_ApplyPremultipliedM4V3(HMM_Mat4 Premultiplied, HMM_Vec3 Vector)
+{
+    ASSERT_COVERED(HMM_ApplyPremultipliedM4V3);
+
+    HMM_Vec4 Point = HMM_V4(Vector.X, Vector.Y, Vector.Z, 1.0f);
+    HMM_Vec4 Result = HMM_MulM4V4(Premultiplied, Point);
+    return HMM_V3(Result.X, Result.Y, Result.Z);
+}
+
+COVERAGE(HMM_ApplyPremultipliedM4Batch, 1)
+static inline void HMM_ApplyPremultipliedM4Batch(HMM_Mat4 Premultiplied,
+    const HMM_Vec4* Points, HMM_Vec4* Output, int Count)
+{
+    ASSERT_COVERED(HMM_ApplyPremultipliedM4Batch);
+
+    for (int Index = 0; Index < Count; ++Index)
+    {
+        Output[Index] = HMM_MulM4V4(Premultiplied, Points[Index]);
+    }
+}
+
 COVERAGE(HMM_DivM4F, 1)
 static inline HMM_Mat4 HMM_DivM4F(HMM_Mat4 Matrix, float Scalar)
 {

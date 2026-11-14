@@ -11,6 +11,14 @@ all_cpp: cpp98 cpp98_no_simd cpp03 cpp11 cpp14 cpp17 cpp20
 clean:
 	rm -rf $(BUILD_DIR)
 
+.PHONY: bench_premultiply
+bench_premultiply:
+	@echo "\nBenchmarking premultiplied matrix transforms (100k points)"
+	mkdir -p $(BUILD_DIR)
+	$(CC) -O2 -std=c11 -Wall -Wextra bench_premultiply.c \
+		-lm -o $(BUILD_DIR)/bench_premultiply \
+		&& $(BUILD_DIR)/bench_premultiply
+
 .PHONY: c99
 c99:
 	@echo "\nCompiling as C99"
