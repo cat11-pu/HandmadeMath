@@ -134,6 +134,9 @@
 
 #ifdef HANDMADE_MATH__USE_SSE
 # include <xmmintrin.h>
+# ifdef __FMA__
+#  include <immintrin.h>
+# endif
 #endif
 
 #ifdef HANDMADE_MATH__USE_NEON
@@ -1694,31 +1697,339 @@ static inline float HMM_DeterminantM4(HMM_Mat4 Matrix)
     return HMM_DotV3(C01, B32) + HMM_DotV3(C23, B10);
 }
 
+COVERAGE(HMM_TryInvGeneralM4, 1)
+// Attempts to invert a general-purpose HMM_Mat4 using a fixed-size LU factorization
+// with partial pivoting. Returns 1 on success and 0 for a singular or non-finite
+// matrix. On failure, Inverse is left unchanged.
+static inline HMM_Bool HMM_TryInvGeneralM4(HMM_Mat4 Matrix, HMM_Mat4 *Inverse)
+{
+    ASSERT_COVERED(HMM_TryInvGeneralM4);
+
+    HMM_Vec4 R0, R1, R2, R3;
+    HMM_Vec4 Y0, Y1, Y2, Y3;
+    HMM_Vec4 X0, X1, X2, X3;
+    HMM_Vec4 SwapRow;
+    float L10 = 0.0f, L20 = 0.0f, L30 = 0.0f;
+    float L21 = 0.0f, L31 = 0.0f, L32 = 0.0f;
+    float MaxAbs = 0.0f;
+    float PivotTolerance;
+    float Pivot;
+    float SwapFactor;
+    int P0 = 0, P1 = 1, P2 = 2, P3 = 3;
+    int SwapPerm;
+
+    if (!Inverse)
+    {
+        return 0;
+    }
+
+#ifdef HANDMADE_MATH__USE_SSE
+    {
+        __m128 SignMask = _mm_set1_ps(-0.0f);
+        __m128 AbsMax;
+        __m128 Bad;
+
+        R0 = Matrix.Columns[0];
+        R1 = Matrix.Columns[1];
+        R2 = Matrix.Columns[2];
+        R3 = Matrix.Columns[3];
+        _MM_TRANSPOSE4_PS(R0.SSE, R1.SSE, R2.SSE, R3.SSE);
+
+        AbsMax = _mm_max_ps(
+            _mm_max_ps(_mm_andnot_ps(SignMask, R0.SSE), _mm_andnot_ps(SignMask, R1.SSE)),
+            _mm_max_ps(_mm_andnot_ps(SignMask, R2.SSE), _mm_andnot_ps(SignMask, R3.SSE)));
+        AbsMax = _mm_max_ps(AbsMax, _mm_shuffle_ps(AbsMax, AbsMax, _MM_SHUFFLE(1, 0, 3, 2)));
+        AbsMax = _mm_max_ps(AbsMax, _mm_shuffle_ps(AbsMax, AbsMax, _MM_SHUFFLE(2, 3, 0, 1)));
+        MaxAbs = _mm_cvtss_f32(AbsMax);
+
+        Bad = _mm_or_ps(
+            _mm_or_ps(_mm_cmpunord_ps(R0.SSE, R0.SSE), _mm_cmpunord_ps(R1.SSE, R1.SSE)),
+            _mm_or_ps(_mm_cmpunord_ps(R2.SSE, R2.SSE), _mm_cmpunord_ps(R3.SSE, R3.SSE)));
+        if (MaxAbs == 0.0f || _mm_movemask_ps(Bad) != 0)
+        {
+            return 0;
+        }
+    }
+#else
+    {
+        int Row, Column;
+
+        for (Column = 0; Column < 4; ++Column)
+        {
+            R0.Elements[Column] = Matrix.Elements[Column][0];
+            R1.Elements[Column] = Matrix.Elements[Column][1];
+            R2.Elements[Column] = Matrix.Elements[Column][2];
+            R3.Elements[Column] = Matrix.Elements[Column][3];
+        }
+
+        for (Row = 0; Row < 4; ++Row)
+        {
+            for (Column = 0; Column < 4; ++Column)
+            {
+                float Value = (Row == 0) ? R0.Elements[Column] :
+                              (Row == 1) ? R1.Elements[Column] :
+                              (Row == 2) ? R2.Elements[Column] : R3.Elements[Column];
+                float AbsValue;
+
+                if (!(Value == Value))
+                {
+                    return 0;
+                }
+                AbsValue = Value < 0.0f ? -Value : Value;
+                if (AbsValue > MaxAbs)
+                {
+                    MaxAbs = AbsValue;
+                }
+            }
+        }
+
+        if (MaxAbs == 0.0f)
+        {
+            return 0;
+        }
+    }
+#endif
+
+    PivotTolerance = MaxAbs * 8.0f * 1.19209290e-7f;
+
+#ifdef HANDMADE_MATH__USE_SSE
+# if defined(__FMA__)
+#  define HMM_INV_ROW_SUB(A, B, S) \
+    (A).SSE = _mm_fnmadd_ps(_mm_set1_ps(S), (B).SSE, (A).SSE)
+# else
+# define HMM_INV_ROW_SUB(A, B, S) \
+    (A).SSE = _mm_sub_ps((A).SSE, _mm_mul_ps(_mm_set1_ps(S), (B).SSE))
+# endif
+# define HMM_INV_LANE(A, I) \
+    _mm_cvtss_f32(_mm_shuffle_ps((A).SSE, (A).SSE, _MM_SHUFFLE(I, I, I, I)))
+# define HMM_INV_SET_PERM(A, P) \
+    (A).SSE = _mm_set_ps((float)((P) == 3), (float)((P) == 2), \
+                         (float)((P) == 1), (float)((P) == 0))
+# define HMM_INV_SET_SCALE(A, B, S) \
+    (A).SSE = _mm_mul_ps((B).SSE, _mm_set1_ps(S))
+# if defined(__FMA__)
+#  define HMM_INV_SET_DIFF_SCALE(A, B, C, S1, S2) \
+    (A).SSE = _mm_mul_ps(_mm_fnmadd_ps(_mm_set1_ps(S1), (C).SSE, (B).SSE), _mm_set1_ps(S2))
+#  define HMM_INV_SET_DIFF2_SCALE(A, B, C, S1, D, S2, Scale) \
+    (A).SSE = _mm_mul_ps(_mm_fnmadd_ps(_mm_set1_ps(S2), (D).SSE, \
+                                       _mm_fnmadd_ps(_mm_set1_ps(S1), (C).SSE, (B).SSE)), \
+                         _mm_set1_ps(Scale))
+#  define HMM_INV_SET_DIFF3_SCALE(A, B, C, S1, D, S2, E, S3, Scale) \
+    (A).SSE = _mm_mul_ps(_mm_fnmadd_ps(_mm_set1_ps(S3), (E).SSE, \
+                                       _mm_fnmadd_ps(_mm_set1_ps(S2), (D).SSE, \
+                                                     _mm_fnmadd_ps(_mm_set1_ps(S1), (C).SSE, (B).SSE))), \
+                         _mm_set1_ps(Scale))
+# else
+# define HMM_INV_SET_DIFF_SCALE(A, B, C, S1, S2) \
+    (A).SSE = _mm_mul_ps(_mm_sub_ps((B).SSE, _mm_mul_ps(_mm_set1_ps(S1), (C).SSE)), _mm_set1_ps(S2))
+# define HMM_INV_SET_DIFF2_SCALE(A, B, C, S1, D, S2, Scale) \
+    (A).SSE = _mm_mul_ps(_mm_sub_ps(_mm_sub_ps((B).SSE, _mm_mul_ps(_mm_set1_ps(S1), (C).SSE)), \
+                                   _mm_mul_ps(_mm_set1_ps(S2), (D).SSE)), _mm_set1_ps(Scale))
+# define HMM_INV_SET_DIFF3_SCALE(A, B, C, S1, D, S2, E, S3, Scale) \
+    (A).SSE = _mm_mul_ps(_mm_sub_ps(_mm_sub_ps(_mm_sub_ps((B).SSE, _mm_mul_ps(_mm_set1_ps(S1), (C).SSE)), \
+                                                _mm_mul_ps(_mm_set1_ps(S2), (D).SSE)), \
+                                   _mm_mul_ps(_mm_set1_ps(S3), (E).SSE)), _mm_set1_ps(Scale))
+# endif
+#else
+# define HMM_INV_ROW_SUB(A, B, S) do { \
+    (A).Elements[0] -= (S) * (B).Elements[0]; \
+    (A).Elements[1] -= (S) * (B).Elements[1]; \
+    (A).Elements[2] -= (S) * (B).Elements[2]; \
+    (A).Elements[3] -= (S) * (B).Elements[3]; \
+} while (0)
+# define HMM_INV_LANE(A, I) ((A).Elements[I])
+# define HMM_INV_SET_PERM(A, P) do { \
+    (A).Elements[0] = (float)((P) == 0); \
+    (A).Elements[1] = (float)((P) == 1); \
+    (A).Elements[2] = (float)((P) == 2); \
+    (A).Elements[3] = (float)((P) == 3); \
+} while (0)
+# define HMM_INV_SET_SCALE(A, B, S) do { \
+    (A).Elements[0] = (B).Elements[0] * (S); \
+    (A).Elements[1] = (B).Elements[1] * (S); \
+    (A).Elements[2] = (B).Elements[2] * (S); \
+    (A).Elements[3] = (B).Elements[3] * (S); \
+} while (0)
+# define HMM_INV_SET_DIFF_SCALE(A, B, C, S1, S2) do { \
+    (A).Elements[0] = ((B).Elements[0] - (S1) * (C).Elements[0]) * (S2); \
+    (A).Elements[1] = ((B).Elements[1] - (S1) * (C).Elements[1]) * (S2); \
+    (A).Elements[2] = ((B).Elements[2] - (S1) * (C).Elements[2]) * (S2); \
+    (A).Elements[3] = ((B).Elements[3] - (S1) * (C).Elements[3]) * (S2); \
+} while (0)
+# define HMM_INV_SET_DIFF2_SCALE(A, B, C, S1, D, S2, Scale) do { \
+    (A).Elements[0] = ((B).Elements[0] - (S1) * (C).Elements[0] - (S2) * (D).Elements[0]) * (Scale); \
+    (A).Elements[1] = ((B).Elements[1] - (S1) * (C).Elements[1] - (S2) * (D).Elements[1]) * (Scale); \
+    (A).Elements[2] = ((B).Elements[2] - (S1) * (C).Elements[2] - (S2) * (D).Elements[2]) * (Scale); \
+    (A).Elements[3] = ((B).Elements[3] - (S1) * (C).Elements[3] - (S2) * (D).Elements[3]) * (Scale); \
+} while (0)
+# define HMM_INV_SET_DIFF3_SCALE(A, B, C, S1, D, S2, E, S3, Scale) do { \
+    (A).Elements[0] = ((B).Elements[0] - (S1) * (C).Elements[0] - (S2) * (D).Elements[0] - (S3) * (E).Elements[0]) * (Scale); \
+    (A).Elements[1] = ((B).Elements[1] - (S1) * (C).Elements[1] - (S2) * (D).Elements[1] - (S3) * (E).Elements[1]) * (Scale); \
+    (A).Elements[2] = ((B).Elements[2] - (S1) * (C).Elements[2] - (S2) * (D).Elements[2] - (S3) * (E).Elements[2]) * (Scale); \
+    (A).Elements[3] = ((B).Elements[3] - (S1) * (C).Elements[3] - (S2) * (D).Elements[3] - (S3) * (E).Elements[3]) * (Scale); \
+} while (0)
+#endif
+
+#define HMM_INV_ABS(V) ((V) < 0.0f ? -(V) : (V))
+#define HMM_INV_ROW_SWAP(A, B) do { \
+    SwapRow = (A); (A) = (B); (B) = SwapRow; \
+} while (0)
+#define HMM_INV_FACTOR_SWAP(A, B) do { \
+    SwapFactor = (A); (A) = (B); (B) = SwapFactor; \
+} while (0)
+#define HMM_INV_PERM_SWAP(A, B) do { \
+    SwapPerm = (A); (A) = (B); (B) = SwapPerm; \
+} while (0)
+
+    if (HMM_INV_ABS(HMM_INV_LANE(R1, 0)) > HMM_INV_ABS(HMM_INV_LANE(R0, 0)))
+    {
+        HMM_INV_ROW_SWAP(R0, R1);
+        HMM_INV_PERM_SWAP(P0, P1);
+    }
+
+    if (HMM_INV_ABS(HMM_INV_LANE(R2, 0)) > HMM_INV_ABS(HMM_INV_LANE(R0, 0)))
+    {
+        HMM_INV_ROW_SWAP(R0, R2);
+        HMM_INV_PERM_SWAP(P0, P2);
+    }
+
+    if (HMM_INV_ABS(HMM_INV_LANE(R3, 0)) > HMM_INV_ABS(HMM_INV_LANE(R0, 0)))
+    {
+        HMM_INV_ROW_SWAP(R0, R3);
+        HMM_INV_PERM_SWAP(P0, P3);
+    }
+
+    Pivot = HMM_INV_LANE(R0, 0);
+    if (HMM_INV_ABS(Pivot) <= PivotTolerance)
+    {
+        return 0;
+    }
+    L10 = HMM_INV_LANE(R1, 0) / Pivot;
+    L20 = HMM_INV_LANE(R2, 0) / Pivot;
+    L30 = HMM_INV_LANE(R3, 0) / Pivot;
+    HMM_INV_ROW_SUB(R1, R0, L10);
+    HMM_INV_ROW_SUB(R2, R0, L20);
+    HMM_INV_ROW_SUB(R3, R0, L30);
+
+    if (HMM_INV_ABS(HMM_INV_LANE(R2, 1)) > HMM_INV_ABS(HMM_INV_LANE(R1, 1)))
+    {
+        HMM_INV_ROW_SWAP(R1, R2);
+        HMM_INV_FACTOR_SWAP(L10, L20);
+        HMM_INV_PERM_SWAP(P1, P2);
+    }
+
+    if (HMM_INV_ABS(HMM_INV_LANE(R3, 1)) > HMM_INV_ABS(HMM_INV_LANE(R1, 1)))
+    {
+        HMM_INV_ROW_SWAP(R1, R3);
+        HMM_INV_FACTOR_SWAP(L10, L30);
+        HMM_INV_PERM_SWAP(P1, P3);
+    }
+
+    Pivot = HMM_INV_LANE(R1, 1);
+    if (HMM_INV_ABS(Pivot) <= PivotTolerance)
+    {
+        return 0;
+    }
+    L21 = HMM_INV_LANE(R2, 1) / Pivot;
+    L31 = HMM_INV_LANE(R3, 1) / Pivot;
+    HMM_INV_ROW_SUB(R2, R1, L21);
+    HMM_INV_ROW_SUB(R3, R1, L31);
+
+    if (HMM_INV_ABS(HMM_INV_LANE(R3, 2)) > HMM_INV_ABS(HMM_INV_LANE(R2, 2)))
+    {
+        HMM_INV_ROW_SWAP(R2, R3);
+        HMM_INV_FACTOR_SWAP(L20, L30);
+        HMM_INV_FACTOR_SWAP(L21, L31);
+        HMM_INV_PERM_SWAP(P2, P3);
+    }
+
+    Pivot = HMM_INV_LANE(R2, 2);
+    if (HMM_INV_ABS(Pivot) <= PivotTolerance)
+    {
+        return 0;
+    }
+    L32 = HMM_INV_LANE(R3, 2) / Pivot;
+    HMM_INV_ROW_SUB(R3, R2, L32);
+
+    Pivot = HMM_INV_LANE(R3, 3);
+    if (HMM_INV_ABS(Pivot) <= PivotTolerance)
+    {
+        return 0;
+    }
+
+    HMM_INV_SET_PERM(Y0, P0);
+    HMM_INV_SET_PERM(Y1, P1);
+    HMM_INV_SET_PERM(Y2, P2);
+    HMM_INV_SET_PERM(Y3, P3);
+
+    HMM_INV_ROW_SUB(Y1, Y0, L10);
+    HMM_INV_ROW_SUB(Y2, Y0, L20);
+    HMM_INV_ROW_SUB(Y2, Y1, L21);
+    HMM_INV_ROW_SUB(Y3, Y0, L30);
+    HMM_INV_ROW_SUB(Y3, Y1, L31);
+    HMM_INV_ROW_SUB(Y3, Y2, L32);
+
+    {
+        float InvPivot;
+        InvPivot = 1.0f / HMM_INV_LANE(R3, 3);
+        HMM_INV_SET_SCALE(X3, Y3, InvPivot);
+        InvPivot = 1.0f / HMM_INV_LANE(R2, 2);
+        HMM_INV_SET_DIFF_SCALE(X2, Y2, X3, HMM_INV_LANE(R2, 3), InvPivot);
+        InvPivot = 1.0f / HMM_INV_LANE(R1, 1);
+        HMM_INV_SET_DIFF2_SCALE(X1, Y1, X2, HMM_INV_LANE(R1, 2), X3, HMM_INV_LANE(R1, 3), InvPivot);
+        InvPivot = 1.0f / HMM_INV_LANE(R0, 0);
+        HMM_INV_SET_DIFF3_SCALE(X0, Y0, X1, HMM_INV_LANE(R0, 1), X2, HMM_INV_LANE(R0, 2), X3, HMM_INV_LANE(R0, 3), InvPivot);
+    }
+
+#ifdef HANDMADE_MATH__USE_SSE
+    _MM_TRANSPOSE4_PS(X0.SSE, X1.SSE, X2.SSE, X3.SSE);
+    _mm_storeu_ps(&Inverse->Elements[0][0], X0.SSE);
+    _mm_storeu_ps(&Inverse->Elements[1][0], X1.SSE);
+    _mm_storeu_ps(&Inverse->Elements[2][0], X2.SSE);
+    _mm_storeu_ps(&Inverse->Elements[3][0], X3.SSE);
+#else
+    {
+        int Column;
+        for (Column = 0; Column < 4; ++Column)
+        {
+            Inverse->Elements[Column][0] = X0.Elements[Column];
+            Inverse->Elements[Column][1] = X1.Elements[Column];
+            Inverse->Elements[Column][2] = X2.Elements[Column];
+            Inverse->Elements[Column][3] = X3.Elements[Column];
+        }
+    }
+#endif
+
+#undef HMM_INV_ROW_SUB
+#undef HMM_INV_LANE
+#undef HMM_INV_SET_PERM
+#undef HMM_INV_SET_SCALE
+#undef HMM_INV_SET_DIFF_SCALE
+#undef HMM_INV_SET_DIFF2_SCALE
+#undef HMM_INV_SET_DIFF3_SCALE
+#undef HMM_INV_ABS
+#undef HMM_INV_ROW_SWAP
+#undef HMM_INV_FACTOR_SWAP
+#undef HMM_INV_PERM_SWAP
+
+    return 1;
+}
+
 COVERAGE(HMM_InvGeneralM4, 1)
-// Returns a general-purpose inverse of an HMM_Mat4. Note that special-purpose inverses of many transformations
-// are available and will be more efficient.
+// Returns a general-purpose inverse of an HMM_Mat4. Returns a zero matrix if
+// Matrix is singular. Use HMM_TryInvGeneralM4 when failure must be detected.
+// Note that special-purpose inverses of many transformations are available and
+// will be more efficient.
 static inline HMM_Mat4 HMM_InvGeneralM4(HMM_Mat4 Matrix)
 {
     ASSERT_COVERED(HMM_InvGeneralM4);
 
-    HMM_Vec3 C01 = HMM_Cross(Matrix.Columns[0].XYZ, Matrix.Columns[1].XYZ);
-    HMM_Vec3 C23 = HMM_Cross(Matrix.Columns[2].XYZ, Matrix.Columns[3].XYZ);
-    HMM_Vec3 B10 = HMM_SubV3(HMM_MulV3F(Matrix.Columns[0].XYZ, Matrix.Columns[1].W), HMM_MulV3F(Matrix.Columns[1].XYZ, Matrix.Columns[0].W));
-    HMM_Vec3 B32 = HMM_SubV3(HMM_MulV3F(Matrix.Columns[2].XYZ, Matrix.Columns[3].W), HMM_MulV3F(Matrix.Columns[3].XYZ, Matrix.Columns[2].W));
-
-    float InvDeterminant = 1.0f / (HMM_DotV3(C01, B32) + HMM_DotV3(C23, B10));
-    C01 = HMM_MulV3F(C01, InvDeterminant);
-    C23 = HMM_MulV3F(C23, InvDeterminant);
-    B10 = HMM_MulV3F(B10, InvDeterminant);
-    B32 = HMM_MulV3F(B32, InvDeterminant);
-
-    HMM_Mat4 Result;
-    Result.Columns[0] = HMM_V4V(HMM_AddV3(HMM_Cross(Matrix.Columns[1].XYZ, B32), HMM_MulV3F(C23, Matrix.Columns[1].W)), -HMM_DotV3(Matrix.Columns[1].XYZ, C23));
-    Result.Columns[1] = HMM_V4V(HMM_SubV3(HMM_Cross(B32, Matrix.Columns[0].XYZ), HMM_MulV3F(C23, Matrix.Columns[0].W)), +HMM_DotV3(Matrix.Columns[0].XYZ, C23));
-    Result.Columns[2] = HMM_V4V(HMM_AddV3(HMM_Cross(Matrix.Columns[3].XYZ, B10), HMM_MulV3F(C01, Matrix.Columns[3].W)), -HMM_DotV3(Matrix.Columns[3].XYZ, C01));
-    Result.Columns[3] = HMM_V4V(HMM_SubV3(HMM_Cross(B10, Matrix.Columns[2].XYZ), HMM_MulV3F(C01, Matrix.Columns[2].W)), +HMM_DotV3(Matrix.Columns[2].XYZ, C01));
-
-    return HMM_TransposeM4(Result);
+    HMM_Mat4 Result = HMM_M4();
+    if (!HMM_TryInvGeneralM4(Matrix, &Result))
+    {
+        return HMM_M4();
+    }
+    return Result;
 }
 
 /*
@@ -2836,6 +3147,13 @@ static inline HMM_Mat4 HMM_InvGeneral(HMM_Mat4 Matrix)
 {
     ASSERT_COVERED(HMM_InvGeneralM4CPP);
     return HMM_InvGeneralM4(Matrix);
+}
+
+COVERAGE(HMM_TryInvGeneralM4CPP, 1)
+static inline HMM_Bool HMM_TryInvGeneral(HMM_Mat4 Matrix, HMM_Mat4 *Inverse)
+{
+    ASSERT_COVERED(HMM_TryInvGeneralM4CPP);
+    return HMM_TryInvGeneralM4(Matrix, Inverse);
 }
 
 COVERAGE(HMM_DotQCPP, 1)
