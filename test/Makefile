@@ -1,15 +1,45 @@
 BUILD_DIR=./build
+PROPERTY_COUNT ?= 500000
+PROPERTY_CFLAGS ?= -O2
 
 CXXFLAGS+=-g -Wall -Wextra -pthread -Wno-missing-braces -Wno-missing-field-initializers -Wfloat-equal
 
 .PHONY: all all_c all_cpp
-all: all_c all_cpp
+all: property all_c all_cpp
 all_c: c99 c99_no_simd c11 c17
 all_cpp: cpp98 cpp98_no_simd cpp03 cpp11 cpp14 cpp17 cpp20
 
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
+
+.PHONY: property
+property:
+	@echo "\nRunning randomized property tests ($(PROPERTY_COUNT) cases per property)"
+	mkdir -p $(BUILD_DIR)
+	cd $(BUILD_DIR) \
+		&& $(CC) $(CPPFLAGS) $(CXXFLAGS) $(PROPERTY_CFLAGS) -Wno-float-equal -std=c99 \
+			../property_test.c \
+			-lm -o property_test \
+		&& ./property_test --count $(PROPERTY_COUNT) > property_run_1.txt \
+		&& ./property_test --count $(PROPERTY_COUNT) > property_run_2.txt \
+		&& cmp property_run_1.txt property_run_2.txt \
+		&& cat property_run_1.txt \
+		&& echo "Cross-process transcripts are bit-for-bit identical."
+
+.PHONY: property_cpp
+property_cpp:
+	@echo "\nRunning randomized property tests as C++ ($(PROPERTY_COUNT) cases per property)"
+	mkdir -p $(BUILD_DIR)
+	cd $(BUILD_DIR) \
+		&& $(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PROPERTY_CFLAGS) -Wno-float-equal -x c++ -std=c++11 \
+			../property_test.c \
+			-lm -o property_test_cpp \
+		&& ./property_test_cpp --count $(PROPERTY_COUNT) > property_cpp_run_1.txt \
+		&& ./property_test_cpp --count $(PROPERTY_COUNT) > property_cpp_run_2.txt \
+		&& cmp property_cpp_run_1.txt property_cpp_run_2.txt \
+		&& cat property_cpp_run_1.txt \
+		&& echo "Cross-process C++ transcripts are bit-for-bit identical."
 
 .PHONY: c99
 c99:
